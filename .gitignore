@@ -1,0 +1,18 @@
+.venv/
+__pycache__/
+*.py[cod]
+
+# Local notes/tutorials written for learning, not for submission.
+*讲解.md
+
+# Generated evaluation/training artifacts.
+outputs/
+runs/
+wandb/
+checkpoints/
+models/
+
+# Local secrets and machine-specific files.
+.env
+.env.*
+.DS_Store
