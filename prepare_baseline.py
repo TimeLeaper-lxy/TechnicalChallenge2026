@@ -74,6 +74,7 @@ def load_examples(args):
                 subject,
                 split=args.split,
             )
+            # 做一下转换 统一列名 这样是为了后面可以统一用一套逻辑
             for row in dataset:
                 examples.append(
                     {
@@ -85,6 +86,7 @@ def load_examples(args):
                 )
         return examples[: args.max_samples] if args.max_samples else examples
 
+    # 如果参数传入是gsm8k而不是math
     dataset = load_dataset("openai/gsm8k", "main", split=args.split)
     examples = []
     for row in dataset:
@@ -99,19 +101,19 @@ def load_examples(args):
         )
     return examples[: args.max_samples] if args.max_samples else examples
 
-
+# 把列表切成小批次 按照batch size，yield一次返回一批
 def batched(items, batch_size):
     for start in range(0, len(items), batch_size):
         yield start, items[start : start + batch_size]
 
-
+# transformer没有自动截断字符串到stop，需要手动截断（到</answer>）
 def trim_after_stop(text: str, stop: str) -> str:
     stop_index = text.find(stop)
-    if stop_index == -1:
+    if stop_index == -1:# 如果没找到 就原样返回
         return text
     return text[: stop_index + len(stop)]
 
-
+# 把字符串 dtype 转成 torch dtype 
 def dtype_from_name(dtype_name: str):
     import torch
 
@@ -126,44 +128,49 @@ def dtype_from_name(dtype_name: str):
         return "auto"
     raise ValueError(f"Unsupported dtype: {dtype_name}")
 
-
+# 重点：生成函数
 def generate_with_transformers(args, prompts):
     import torch
     from transformers import AutoModelForCausalLM, AutoTokenizer
-
+    # AutoTokenizer 用来加载 tokenizer。AutoModelForCausalLM 用来加载自回归语言模型。
     torch.manual_seed(args.seed)
     device = "cuda" if torch.cuda.is_available() else "cpu"
     tokenizer = AutoTokenizer.from_pretrained(args.model)
-    tokenizer.padding_side = "left"
+    # 为什么要用padding？因为同一个batch里面可能有多条prompt，每条长度可能不同，需要把他们组成一个矩阵。
+    tokenizer.padding_side = "left"# 采用左padding的方式，即在左侧添加pad补齐长度
+    # 如果tokenizer 没有 pad token，就用 eos token 代替（end ofsequence）
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    dtype = dtype_from_name(args.dtype)
+    #加载模型
+    dtype = dtype_from_name(args.dtype)#torch.float16
     model = AutoModelForCausalLM.from_pretrained(
-        args.model,
-        dtype=dtype,
-        attn_implementation="sdpa",
+        args.model,#模型名
+        dtype=dtype,#fp16
+        attn_implementation="sdpa",#PyTorch 的 scaled dot product attention
     )
+    #模型参数移动GPU eval是推理模式
     model.to(device)
     model.eval()
 
     all_responses = []
-    for _, batch_prompts in tqdm(
-        batched(prompts, args.batch_size),
-        total=(len(prompts) + args.batch_size - 1) // args.batch_size,
-        desc="generate",
+    for _, batch_prompts in tqdm(# tqdm给循环加进度条
+        batched(prompts, args.batch_size),#调用之前定义的函数切分小批次 每次只有batchsize条prompt
+        total=(len(prompts) + args.batch_size - 1) // args.batch_size,#计算batch数向上取整
+        desc="generate",#进度条前面的描述文字
     ):
-        inputs = tokenizer(
+        # 把字符串变成模型输入
+        inputs = tokenizer(# python语法，等价于tokenizer.__call__()
             batch_prompts,
-            return_tensors="pt",
-            padding=True,
-            truncation=True,
-            max_length=args.max_model_len,
-        ).to(device)
+            return_tensors="pt",#pytorch tensor
+            padding=True,# 同一个batch内prompt补齐长度
+            truncation=True,# 如果prompt太长就截断
+            max_length=args.max_model_len,#最多保留这么多token输入 命令传参
+        ).to(device)#返回的内容是一个字典
 
-        with torch.inference_mode():
+        with torch.inference_mode():# 表示不需要计算梯度（不需要训练，省显存）
             output_ids = model.generate(
-                **inputs,
+                **inputs,#inputs字典展开成参数
                 max_new_tokens=args.max_tokens,
                 do_sample=args.temperature > 0,
                 temperature=args.temperature if args.temperature > 0 else None,
@@ -235,13 +242,14 @@ def parse_args():
 
 def main():
     args = parse_args()
-    examples = load_examples(args)
+    examples = load_examples(args)# 字典列表 前面提过
     if not examples:
         raise RuntimeError("No examples were loaded. Check dataset/split settings.")
 
     output_path = Path(args.output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
+    # 可以看到 prompts就是经过两次填充两个常量提示词之后再组成列表  列表->列表可以用推导式
     prompts = [build_prompt(item["question"]) for item in examples]
     if args.backend == "vllm":
         responses = generate_with_vllm(args, prompts)
