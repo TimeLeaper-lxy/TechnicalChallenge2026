@@ -234,7 +234,7 @@ def tokenize_sft_examples(tokenizer, examples, args, name="train"):
     )
     return features
 
-
+# 把若干样本 padding（填充） 成同一个 batch tensor
 def collate_sft_batch(features, pad_token_id, device):
     batch_size = len(features)
     max_len = max(len(item["input_ids"]) for item in features)
